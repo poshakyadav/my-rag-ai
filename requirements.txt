@@ -1,0 +1,10 @@
+chromadb
+langchain
+langchain-community
+langchain-groq
+sentence-transformers
+tavily-python
+groq
+python-dotenv
+gradio
+rich
