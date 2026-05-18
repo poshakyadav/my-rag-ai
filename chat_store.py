@@ -1,4 +1,5 @@
 # chat_store.py
+
 """
 chat_store.py — Poshak-AI
 ──────────────────────────
@@ -10,10 +11,10 @@ Database: ./conversations.db  (auto-created on first run)
 Tables:
   - sessions  : one row per conversation (metadata only)
 
-Fix: list_sessions() now returns ALL sessions (no message_count filter).
-     New chats appear in the sidebar immediately after creation.
-     get_most_recent_session() still filters for message_count > 0
-     so startup doesn't resume into a blank empty session.
+Key fixes:
+  - list_sessions() accepts workspace="" to return ALL sessions (no filter).
+  - get_most_recent_session() also accepts workspace="" for same reason.
+  - New chats appear in the sidebar immediately after creation.
 """
 
 import sqlite3
@@ -44,6 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated
 ON sessions (workspace, updated_at DESC);
 """
 
+_CREATE_INDEX_UPDATED = """
+CREATE INDEX IF NOT EXISTS idx_sessions_updated
+ON sessions (updated_at DESC);
+"""
+
 
 # ── Connection ────────────────────────────────────────────────────────────────
 
@@ -62,6 +68,7 @@ def init_db() -> None:
     with _get_conn() as conn:
         conn.execute(_CREATE_SESSIONS_TABLE)
         conn.execute(_CREATE_INDEX)
+        conn.execute(_CREATE_INDEX_UPDATED)
         conn.commit()
 
 
@@ -71,9 +78,11 @@ def create_session(workspace: str = ACTIVE_PROJECT) -> str:
     """
     Creates a new chat session and returns its session_id (UUID).
     This UUID is also used as LangGraph's thread_id.
+    workspace defaults to "" (general mode) when ACTIVE_PROJECT is not set.
     """
     session_id = str(uuid.uuid4())
     now = _now()
+    ws = workspace or ""
     with _get_conn() as conn:
         conn.execute(
             """
@@ -81,7 +90,7 @@ def create_session(workspace: str = ACTIVE_PROJECT) -> str:
                 (session_id, workspace, title, preview, message_count, created_at, updated_at)
             VALUES (?, ?, 'New Chat', '', 0, ?, ?)
             """,
-            (session_id, workspace, now, now),
+            (session_id, ws, now, now),
         )
         conn.commit()
     return session_id
@@ -98,25 +107,34 @@ def get_session(session_id: str) -> Optional[dict]:
 
 def list_sessions(workspace: str = ACTIVE_PROJECT, limit: int = 200) -> list[dict]:
     """
-    Returns ALL sessions for a workspace, newest first.
+    Returns sessions, newest first.
 
-    FIX: Removed the  message_count > 0  filter from the original version.
-    That filter caused newly created sessions to be invisible in the sidebar
-    until the user sent their first message — a confusing UX gap.
+    If workspace is "" (empty string), returns ALL sessions across all workspaces.
+    This is the correct behavior for the sidebar which should show every chat.
 
-    Startup logic (get_most_recent_session) still uses message_count > 0
-    so the app doesn't resume into an empty shell on boot.
+    Pass a specific workspace string to filter to that workspace only.
     """
     with _get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT * FROM sessions
-            WHERE workspace = ?
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (workspace, limit),
-        ).fetchall()
+        if workspace == "" or workspace is None:
+            # No workspace filter — return all sessions
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE workspace = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (workspace, limit),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -169,19 +187,29 @@ def get_most_recent_session(workspace: str = ACTIVE_PROJECT) -> Optional[dict]:
     Returns the most recently updated session that has messages, or None.
     Used on app startup to resume the last conversation.
 
-    Intentionally keeps the  message_count > 0  filter so the app doesn't
-    resume into a blank new-chat shell on startup.
+    If workspace is "" or None, returns the most recent session across ALL workspaces.
+    Keeps message_count > 0 filter so we don't resume into a blank shell.
     """
     with _get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM sessions
-            WHERE workspace = ? AND message_count > 0
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (workspace,),
-        ).fetchone()
+        if workspace == "" or workspace is None:
+            row = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE message_count > 0
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE workspace = ? AND message_count > 0
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (workspace,),
+            ).fetchone()
     return dict(row) if row else None
 
 
@@ -219,7 +247,7 @@ def group_sessions_by_date(sessions: list[dict]) -> dict[str, list[dict]]:
     for s in sessions:
         try:
             raw       = s.get("updated_at", "")
-            raw_clean = raw.split(".")[0]   # strip microseconds if present
+            raw_clean = raw.split(".")[0]
             dt        = datetime.strptime(raw_clean, "%Y-%m-%dT%H:%M:%S").date()
         except Exception:
             dt = today
